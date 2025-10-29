@@ -12,6 +12,9 @@ __pycache__/
 # Output directory
 out/
 
+# Model weights (do not commit large pth files; use auto-download or Git LFS)
+models/*.pth
+
 # IDE
 .vscode/
 .idea/

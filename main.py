@@ -44,7 +44,7 @@ def upscale_image(
 		sharpen_threshold: int = 3,
 		contrast: float = 1.0,
 		dry_run: bool = False,
-	) -> None:
+	) -> bool:
 	try:
 		with Image.open(src_path) as im:
 			mode = im.mode
@@ -69,7 +69,7 @@ def upscale_image(
 
 			if dry_run:
 				print(f"[dry-run] 会写入: {dst_path} (size={new_size}, mode={up.mode})")
-				return
+				return True
 
 			# 保存前处理 alpha / jpeg
 			dst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,8 +85,11 @@ def upscale_image(
 				save_kwargs["quality"] = 95
 
 			up.save(dst_path, **save_kwargs)
+			return True
 	except Exception as e:
 		print(f"跳过文件 {src_path}（无法处理）：{e}")
+        
+	return False
 
 
 def process_directory(
@@ -130,6 +133,7 @@ def process_directory(
 				dst_rel = rel.parent / (stem + p.suffix)
 				dst = output_dir / dst_rel
 				print(f"处理: {p} -> {dst} (scale={scale}, method={method})")
+				ok = False
 				# 如果使用深度学习方法（zssr / anime），调用对应流程
 				if method == "zssr":
 					# 检查全局是否有 torch（避免在函数内再次 import 导致作用域问题）
@@ -137,7 +141,7 @@ def process_directory(
 						print("使用 zssr 模式需要安装 torch 和 torchvision，请运行: python -m pip install torch torchvision")
 						continue
 					# 调用 ZSSR 风格的本地训练与放大（参数可根据需要调整）
-					zssr_upscale(
+					ok = zssr_upscale(
 						p,
 						dst,
 						scale,
@@ -154,7 +158,7 @@ def process_directory(
 						print("要使用 anime 模型，请先安装 PyTorch 与 realesrgan：python -m pip install torch torchvision realesrgan")
 						continue
 					dev = device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
-					anime_upscale(
+					ok = anime_upscale(
 						p,
 						dst,
 						scale,
@@ -166,7 +170,7 @@ def process_directory(
 					)
 					# handled above
 				else:
-					upscale_image(
+					ok = upscale_image(
 						p,
 						dst,
 						scale,
@@ -178,7 +182,10 @@ def process_directory(
 						contrast=contrast,
 						dry_run=dry_run,
 					)
-				files_processed += 1
+				if ok and dst.exists():
+					files_processed += 1
+				else:
+					print(f"未生成输出：{dst}（已跳过或推理出错）")
 
 	print(f"完成：共处理 {files_processed} 个图像")
 
@@ -206,7 +213,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 	return p.parse_args(argv)
 
 
-def zssr_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "cpu", epochs: int = 200, patch_size: int = 64, batch_size: int = 8, lr: float = 1e-4) -> None:
+def zssr_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "cpu", epochs: int = 200, patch_size: int = 64, batch_size: int = 8, lr: float = 1e-4) -> bool:
 	"""基于 ZSSR 思路的简化实现：
 	- 在单张输入图像上自行生成训练对（把图像下采样再上采样得到的对）并训练一个小型 CNN
 	- 训练后对目标尺寸的 bicubic 放大结果进行残差修正，得到最终结果
@@ -221,7 +228,7 @@ def zssr_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "cp
 		import numpy as np
 	except Exception:
 		print("zssr_upscale 需要 torch、torchvision、numpy 等依赖，请先安装：python -m pip install torch torchvision numpy")
-		return
+		return False
 
 	# 简单的小网络（残差学习）
 	class SmallSRNet(nn.Module):
@@ -337,18 +344,39 @@ def zssr_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "cp
 		pred_img.save(dst_path, quality=95)
 	else:
 		pred_img.save(dst_path)
+	return True
 
 
-def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "cpu", weights: str | None = None, style_sensitivity: float = 0.7, tile: int = 0, dry_run: bool = False) -> None:
+def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "cpu", weights: str | None = None, style_sensitivity: float = 0.7, tile: int = 0, dry_run: bool = False) -> bool:
 	"""使用 Real-ESRGAN anime 模型进行超分并按 style_sensitivity 与 bicubic 结果融合。
 
 	仅支持常见放大倍数（2 或 4）。若模型或依赖缺失，会输出友好提示。
 	"""
+	# 兼容旧版 basicsr 对 torchvision.transforms.functional_tensor 的引用
+	# 某些环境下（如 torchvision>=0.15），functional_tensor 已被移除/内部结构变化，
+	# 这里在导入 realesrgan 之前做一次向后兼容的别名注入，避免导入期报错。
 	try:
-		from realesrgan import RealESRGAN
+		import importlib
+		import sys as _sys
+		try:
+			import torchvision.transforms.functional_tensor as _ft  # noqa: F401
+		except Exception:
+			import types as _types
+			from torchvision.transforms import functional as _F
+			_mod = _types.ModuleType("torchvision.transforms.functional_tensor")
+			# basicsr.data.degradations 仅使用了 rgb_to_grayscale
+			_mod.rgb_to_grayscale = _F.rgb_to_grayscale
+			_sys.modules["torchvision.transforms.functional_tensor"] = _mod
 	except Exception:
-		print("anime_upscale 需要安装 realesrgan：python -m pip install realesrgan （以及 torch torchvision）")
-		return
+		pass
+
+	try:
+		from realesrgan import RealESRGANer
+		from basicsr.archs.rrdbnet_arch import RRDBNet
+		import numpy as np
+	except Exception:
+		print("anime_upscale 需要安装 realesrgan / basicsr / numpy 等依赖：python -m pip install realesrgan numpy （以及 torch torchvision）")
+		return False
 
 	# 确定权重路径
 	models_dir = Path("models")
@@ -361,28 +389,34 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 
 	# 自动下载权重（若不存在）
 	if not weights_path.exists():
-		url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.3.0/RealESRGAN_x4plus_anime_6B.pth"
-		print(f"权重文件 {weights_path} 不存在，准备从 {url} 下载（请确认网络可访问）...")
+		primary = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.3.0/RealESRGAN_x4plus_anime_6B.pth"
+		backup = "https://huggingface.co/XPixel/Real-ESRGAN/resolve/main/RealESRGAN_x4plus_anime_6B.pth"
+		print(f"权重文件 {weights_path} 不存在，准备从 {primary} 下载（若失败将尝试备用源）...")
 		try:
 			import requests
 		except Exception:
 			print("下载依赖 requests 缺失，请先安装：python -m pip install requests")
-			return
+			return False
 
-		try:
-			resp = requests.get(url, stream=True, timeout=30)
-			resp.raise_for_status()
-			total = int(resp.headers.get("content-length", 0))
-			with open(weights_path, "wb") as f:
-				downloaded = 0
-				for chunk in resp.iter_content(chunk_size=8192):
-					if chunk:
-						f.write(chunk)
-						downloaded += len(chunk)
-				print(f"下载完成: {weights_path} ({downloaded} bytes)")
-		except Exception as e:
-			print(f"下载权重失败: {e}")
-			return
+		def _download(u: str) -> bool:
+			try:
+				resp = requests.get(u, stream=True, timeout=60)
+				resp.raise_for_status()
+				with open(weights_path, "wb") as f:
+					for chunk in resp.iter_content(chunk_size=8192):
+						if chunk:
+							f.write(chunk)
+				print(f"下载完成: {weights_path}")
+				return True
+			except Exception as _e:
+				print(f"从 {u} 下载失败: {_e}")
+				return False
+
+		if not _download(primary):
+			print("尝试备用源...")
+			if not _download(backup):
+				print("两处源均下载失败，请手动下载权重并放置到 models/ 目录。")
+				return False
 
 	# 仅支持 2 或 4 的 scale 值使用模型（其他 scale 使用 bicubic fallback）
 	if int(scale) not in (2, 4):
@@ -392,11 +426,30 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 	model_scale = int(scale)
 
 	try:
-		model = RealESRGAN(device, scale=model_scale)
-		model.load_weights(str(weights_path))
+		# 默认在 GPU 且未指定分块时启用 tile=512，加速大型图推理并降低显存压力
+		auto_tile = 0
+		if (tile is None) or (tile <= 0):
+			if str(device).startswith("cuda"):
+				auto_tile = 512
+				tile = auto_tile
+				print(f"[提示] GPU 上未指定 --tile，已自动启用分块 tile={tile} 以提升速度与稳定性")
+
+		# anime_6B 使用 6 个 RRDB blocks；标准 x4plus 使用 23 blocks
+		num_block = 6 if "anime_6B" in str(weights_path) else 23
+		model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=num_block, num_grow_ch=32, scale=model_scale)
+		upsampler = RealESRGANer(
+			scale=model_scale,
+			model_path=str(weights_path),
+			model=model,
+			tile=tile if tile and tile > 0 else 0,
+			tile_pad=10,
+			pre_pad=0,
+			half=(str(device).startswith("cuda")),
+			device=device,
+		)
 	except Exception as e:
 		print(f"加载模型失败: {e}")
-		return
+		return False
 
 	with Image.open(src_path) as pil_im:
 		im = pil_im.convert("RGB")
@@ -405,14 +458,21 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 	target_size = (int(im.width * scale), int(im.height * scale))
 	if dry_run:
 		print(f"[dry-run] anime 将写入: {dst_path} (model_scale={model_scale}, target_size={target_size}, weights={weights_path})")
-		return
+		return True
 
-	# 运行模型推理
+	# 运行模型推理（计时）
 	try:
-		sr = model.predict(im)
+		import time as _time
+		start_ts = _time.perf_counter()
+		# upsampler 接受 np.ndarray（RGB）
+		im_np = np.array(im.convert("RGB"))
+		sr_np, _ = upsampler.enhance(im_np, outscale=model_scale)
+		sr = Image.fromarray(sr_np)
+		elapsed = _time.perf_counter() - start_ts
+		print(f"推理耗时：{elapsed:.2f}s")
 	except Exception as e:
 		print(f"模型推理失败: {e}")
-		return
+		return False
 
 	# bicubic baseline（用于融合）
 	bic = im.resize(target_size, resample=Image.BICUBIC).convert("RGB")
@@ -430,6 +490,7 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 		blended.save(dst_path, quality=95)
 	else:
 		blended.save(dst_path)
+	return True
 
 
 

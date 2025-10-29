@@ -1,8 +1,11 @@
 Pillow>=9.0.0
-torch
-torchvision
-numpy
+# 注意：为避免与部分 torch 版本不兼容，这里将 numpy 固定在 <2
+numpy<2
 opencv-python
 tqdm
 realesrgan
 requests
+
+# 说明：torch/torchvision 建议根据你的 CUDA 环境单独安装，以获得匹配的 GPU 版本
+# 示例（请以 PyTorch 官网为准选择 CUDA 版本）：
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
