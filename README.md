@@ -39,6 +39,8 @@ PowerShell 若提示执行策略阻止激活脚本，可用上面命令在“当
 
 ## 2. 运行示例
 
+激活虚拟环境后，即可运行项目。 .venv\Scripts\activate
+
 基础用法（递归处理所有子目录图片，输出写入 `out/`，文件名追加 `_x{scale}` 后缀）：
 
 ```powershell

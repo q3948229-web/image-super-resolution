@@ -418,12 +418,23 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 				print("两处源均下载失败，请手动下载权重并放置到 models/ 目录。")
 				return False
 
+	requested_scale = float(scale)
 	# 仅支持 2 或 4 的 scale 值使用模型（其他 scale 使用 bicubic fallback）
-	if int(scale) not in (2, 4):
+	if requested_scale not in (2.0, 4.0):
 		print(f"anime 模型通常支持 2 或 4 倍放大，当前 scale={scale}，将退回到 bicubic + 少量后处理")
 		return upscale_image(src_path, dst_path, scale, resample=Image.BICUBIC)
 
-	model_scale = int(scale)
+	weights_name = weights_path.name.lower()
+	if "x2" in weights_name:
+		model_scale = 2
+	elif "x4" in weights_name:
+		model_scale = 4
+	elif "x8" in weights_name:
+		model_scale = 8
+	else:
+		model_scale = int(requested_scale)
+	if abs(requested_scale - model_scale) > 1e-6:
+		print(f"[提示] 模型权重原生倍率为 {model_scale}x，将通过 outscale={requested_scale:g} 输出目标尺寸。")
 
 	try:
 		# 默认在 GPU 且未指定分块时启用 tile=512，加速大型图推理并降低显存压力
@@ -455,9 +466,9 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 		im = pil_im.convert("RGB")
 
 	# dry-run 输出信息
-	target_size = (int(im.width * scale), int(im.height * scale))
+	target_size = (int(im.width * requested_scale), int(im.height * requested_scale))
 	if dry_run:
-		print(f"[dry-run] anime 将写入: {dst_path} (model_scale={model_scale}, target_size={target_size}, weights={weights_path})")
+		print(f"[dry-run] anime 将写入: {dst_path} (model_scale={model_scale}, outscale={requested_scale:g}, target_size={target_size}, weights={weights_path})")
 		return True
 
 	# 运行模型推理（计时）
@@ -466,7 +477,7 @@ def anime_upscale(src_path: Path, dst_path: Path, scale: float, device: str = "c
 		start_ts = _time.perf_counter()
 		# upsampler 接受 np.ndarray（RGB）
 		im_np = np.array(im.convert("RGB"))
-		sr_np, _ = upsampler.enhance(im_np, outscale=model_scale)
+		sr_np, _ = upsampler.enhance(im_np, outscale=requested_scale)
 		sr = Image.fromarray(sr_np)
 		elapsed = _time.perf_counter() - start_ts
 		print(f"推理耗时：{elapsed:.2f}s")
